@@ -130,9 +130,9 @@ namespace RemoveTransparentFace
                                 material.Faces.Remove(face);
                             }
                         }
-                        catch (Exception ex)
+                        catch (Exception)
                         {
-                            throw ex;
+                            throw;
                         }
                         finally
                         {
