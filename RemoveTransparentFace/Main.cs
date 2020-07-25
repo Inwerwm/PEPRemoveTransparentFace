@@ -58,64 +58,57 @@ namespace RemoveTransparentFace
             {
                 var pmx = args.Host.Connector.Pmx.GetCurrentState();
                 var selectedMaterials = args.Host.Connector.Form.GetSelectedMaterialIndices().Select(i => pmx.Material[i]);
-
                 var errorLog = new Dictionary<IPXMaterial, string>();
 
                 foreach (var material in selectedMaterials)
                 {
                     string texturePath = material.Tex;
 
-                    if (texturePath == "")
+                    // テクスチャが読めなければcontinue
+                    if (texturePath.Length == 0)
                     {
                         errorLog.Add(material, "材質にテクスチャが設定されていません。");
                         continue;
                     }
-
                     if (string.Compare(Path.GetExtension(texturePath), ".dds", true) == 0)
                     {
                         errorLog.Add(material, "ddsファイルは未対応です。");
                         continue;
                     }
 
-                    // 削除対象のリスト
-                    var removeFaceList = new List<IPXFace>();
-
                     // テクスチャ画像を読み込み
-                    using (Image texture = (string.Compare(Path.GetExtension(texturePath), ".tga", true) == 0) ? TgaDecoder.TgaDecoder.FromFile(texturePath) : Image.FromFile(texturePath))
-                    using (Bitmap UVMap = new Bitmap(texture))
+                    using (Image textureImage = (string.Compare(Path.GetExtension(texturePath), ".tga", true) == 0) ? TgaDecoder.TgaDecoder.FromFile(texturePath) : Image.FromFile(texturePath))
+                    using (Bitmap textureBitmap = new Bitmap(textureImage))
                     {
                         // ビットマップをロック
-                        var bmpData = UVMap.LockBits(new Rectangle(0, 0, UVMap.Width, UVMap.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-                        var pixels = new byte[UVMap.Width * UVMap.Height * 4];
-                        Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+                        var textureBitmapData = textureBitmap.LockBits(new Rectangle(0, 0, textureBitmap.Width, textureBitmap.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                        var pixels = new byte[textureBitmap.Width * textureBitmap.Height * 4];
+                        Marshal.Copy(textureBitmapData.Scan0, pixels, 0, pixels.Length);
 
                         // UVMapを確実に開放するためtry-catch-finallyを使う
                         try
                         {
+                            var removeFaceList = new List<IPXFace>();
+
                             // 各面が不透明なピクセルを持つかを調べる
                             foreach (var face in material.Faces)
                             {
-                                var bb = face.ComputeUVBoundingBox().ToRectangle();
-                                var pxBound = new Rectangle((bb.X * UVMap.Width).Round(), (bb.Y * UVMap.Height).Round(), (bb.Width * UVMap.Width).Round(), (bb.Height * UVMap.Height).Round());
+                                var boundByRatio = face.ComputeUVBoundingBox().ToRectangle();
+                                var boundByPixel = new Rectangle((boundByRatio.X * textureBitmap.Width).Round(), (boundByRatio.Y * textureBitmap.Height).Round(), (boundByRatio.Width * textureBitmap.Width).Round(), (boundByRatio.Height * textureBitmap.Height).Round());
 
-                                Console.WriteLine(face.PrintUV());
-                                // 境界領域内の全ピクセルを走査
+                                // 境界領域内のピクセルを走査
                                 bool existOpacityPixel = false;
-                                for (int y = pxBound.Top; y < pxBound.Bottom; y++)
+                                for (int y = boundByPixel.Top; y < boundByPixel.Bottom; y++)
                                 {
-                                    var logList = new List<string>();
-
-                                    for (int x = pxBound.Left; x < pxBound.Right; x++)
+                                    for (int x = boundByPixel.Left; x < boundByPixel.Right; x++)
                                     {
-                                        int index = (x + y * UVMap.Width) * 4;
+                                        int index = (x + y * textureBitmap.Width) * 4;
+                                        // 0.5を足してピクセルの中心座標を現在位置にする
+                                        // PMXのUVは割合表現で管理されているためテクスチャ画像の大きさで割って割合表現化
+                                        V2 currentPosition = new V2((x + 0.5f) / textureBitmap.Width, (y + 0.5f) / textureBitmap.Height);
 
-                                        // 現在のピクセルが面の領域内であった場合
-                                        V2 currentPosition = new V2((x + 0.5f) / UVMap.Width, (y + 0.5f) / UVMap.Height);
                                         if (face.UVIsInclude(currentPosition))
-                                        {
-                                            // ピクセルの透明度が0であるかを論理和で集計
                                             existOpacityPixel |= pixels[index + 3] != 0;
-                                        }
 
                                         // 短絡評価
                                         if (existOpacityPixel)
@@ -126,9 +119,15 @@ namespace RemoveTransparentFace
                                     if (existOpacityPixel)
                                         break;
                                 }
+
                                 if (!existOpacityPixel)
                                     removeFaceList.Add(face);
+                            }
 
+                            // 透明面を材質から除去
+                            foreach (var face in removeFaceList)
+                            {
+                                material.Faces.Remove(face);
                             }
                         }
                         catch (Exception ex)
@@ -137,28 +136,18 @@ namespace RemoveTransparentFace
                         }
                         finally
                         {
-                            UVMap.UnlockBits(bmpData);
+                            textureBitmap.UnlockBits(textureBitmapData);
                         }
-
-                    }
-
-                    // 透明面を材質から除去
-                    foreach (var face in removeFaceList)
-                    {
-                        material.Faces.Remove(face);
                     }
                 }
 
                 Utility.Update(args.Host.Connector, pmx);
 
                 if (errorLog.Any())
-                {
                     MessageBox.Show(errorLog.Aggregate($"完了{Environment.NewLine}以下の材質は無視されました：", (msg, pair) => $"{msg}{Environment.NewLine}\t{pair.Key.Name}:{pair.Value}"), "選択材質の透明面を除去", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
-                }
                 else
-                {
                     MessageBox.Show("完了", "選択材質の透明面を除去", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
+
             }
             catch (Exception ex)
             {
